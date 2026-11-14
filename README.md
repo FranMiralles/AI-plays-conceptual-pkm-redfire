@@ -5,7 +5,7 @@ This is a work from my Master's degree in Artificial Intelligence applying metah
 ## Dependencias del entorno
 This project runs in a Python environment and relies on the dependencies listed in the `requirements.txt` file, which can be generated with:
 
-pip freeze > requirements.txt
+python -m pip install -r requirements.txt
 
 
 To install the required Node.js modules for the damage_calculator component, navigate to its folder and run:

@@ -50,10 +50,9 @@ Thumbs.db
 .python-version
 
 
-#GIFS
-
-*/sprites/*
-*/normalized_sprites/*
+# Sprites generados por pkm_data/data_fetcher.py (opciones 3 y 4), se pueden regenerar
+**/sprites/
+**/normalized_sprites/
 
 
 *.txt
