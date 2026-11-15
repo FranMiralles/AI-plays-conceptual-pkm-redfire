@@ -100,7 +100,7 @@ Si se cierra la ventana con un entrenamiento en marcha, pide confirmación, lo d
 
 #### Visor
 
-Muestra un individuo: sus capturas, sus equipos y la repetición de sus 21 combates.
+Muestra un individuo: sus capturas, sus equipos, la repetición de sus 21 combates y una explicación de cómo funciona.
 
 **Barra del visor**
 - **Ejemplos ▾:** individuos de `examples/individuals.json`.
@@ -147,6 +147,19 @@ Junto al título se indica de dónde viene el individuo.
   - los cambios de Pokémon se animan;
   - al final aparece *¡VICTORIA!*, *DERROTA* o *TIEMPO AGOTADO*.
 - **Controles:** ⏮ (inicio), ◀ (paso anterior), *▶ Reproducir / ⏸ Pausa*, ▶ (paso siguiente, animado), ⏭ (final), barra para saltar a cualquier paso, velocidad (x0,5 a x4) y *Paso N/M*.
+
+**Pestaña *¿Cómo funciona?***
+Explica, con los datos del individuo cargado:
+- qué es un individuo: capturas, equipos con su orden de salida y plan de cambios; ninguna parte del genotipo dice qué ataque usar;
+- quién elige los ataques: una regla fija para los dos bandos, en cada turno, según quién tiene delante y cuánta vida le queda;
+- quién sale al campo;
+- qué cambia en los 100 escenarios: solo la suerte; el individuo es siempre el mismo y la regla reacciona a cada situación;
+- cómo se calcula el fitness y qué hace el algoritmo genético.
+
+A la derecha, eligiendo un combate, muestra:
+- el equipo en orden de salida, el plan de cambios y cuántas veces gana en los 100 escenarios;
+- dos tablas con el ataque que elige cada uno de tus Pokémon contra cada rival, y cada rival contra cada uno de los tuyos, con el defensor a toda su vida y con poca vida, y el motivo («debilita seguro» o «más daño esperado»);
+- en amarillo, los enfrentamientos del plan de cambios.
 
 #### Ejecuciones
 
@@ -370,7 +383,8 @@ battle_simulator.py        Simulador determinista de combates y fitness
 stochastic_battle.py       Combates aleatorios vectorizados (NumPy) sobre escenarios fijos
 ga/                        config.py (presets), operators.py, fitness.py (caché), engine.py,
                            damage_table.py (precálculo), worker_process.py
-ui/                        main_window, training_view, individual_view, runs_view, charts, widgets, theme
+ui/                        main_window, training_view, individual_view, individual_help, runs_view, charts,
+                           widgets, theme
 route_data/                Rutas, entrenadores, MT, objetos evolutivos, tipo y datos de 3.ª gen. de cada movimiento
 pkm_data/                  data_fetcher.py y datos descargados (no versionados)
 damage_calculator/         Servidor Node.js de cálculo de daño

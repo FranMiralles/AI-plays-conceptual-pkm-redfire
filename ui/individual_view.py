@@ -21,6 +21,7 @@ from ga.fitness import Evaluator, simulate_detailed
 from ui import charts
 from ui import effects
 from ui.effects import EffectOverlay
+from ui.individual_help import HowItWorksPanel
 from ui import gamedata as gd
 from ui import theme
 from ui.widgets import AnimatedSprite, Card, Chip, HPBar, PokeballRow, StatTile, TeamStrip, section_label
@@ -902,6 +903,8 @@ class IndividualView(QWidget):
         self.tabs.addTab(self.summary, "Resumen")
         self.tabs.addTab(self.map_panel, "Mapa de capturas")
         self.tabs.addTab(self.battle_panel, "Combates")
+        self.help_panel = HowItWorksPanel()
+        self.tabs.addTab(self.help_panel, "¿Cómo funciona?")
         self.stack.addWidget(self.tabs)
         root.addWidget(self.stack, 1)
 
@@ -940,6 +943,7 @@ class IndividualView(QWidget):
         self._fill_header(genome, evaluation)
         self._fill_random(scores, evaluation)
         self.map_panel.set_individual(genome)
+        self.help_panel.set_individual(genome, scores)
         if battles:
             if scores is not None:
                 values = [round(float(h)) if w >= 0.5 else -1

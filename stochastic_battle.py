@@ -1490,6 +1490,16 @@ def replay(genome, scenario: int, seed: int = 0, store: MoveStore | None = None)
     return out
 
 
+def explain_choice(store: MoveStore, key_id: int, hp: int) -> tuple:
+    """``(move, reason)``: move the policy chooses against a defender with ``hp`` HP left and why
+    ("debilita seguro": its lowest roll KOs; "más daño esperado": otherwise)."""
+    hp = int(min(max(hp, 1), store["policy"].shape[1] - 1))
+    k = int(store["policy"][key_id, hp])
+    move = store.move_names[int(store["move_id"][key_id, k])]
+    sure = int(store["ko_min"][key_id, k]) >= hp
+    return move, ("debilita seguro" if sure else "más daño esperado")
+
+
 # --------------------------------------------------------------------------- data
 
 
