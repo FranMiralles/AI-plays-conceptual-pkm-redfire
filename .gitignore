@@ -50,9 +50,20 @@ Thumbs.db
 .python-version
 
 
-# Sprites generados por pkm_data/data_fetcher.py (opciones 3 y 4), se pueden regenerar
+# Sprites generados por pkm_data/data_fetcher.py (opciones 2 y 3), se pueden regenerar
 **/sprites/
 **/normalized_sprites/
 
+# Ejecuciones guardadas del algoritmo genético (interfaz y genetic_algorithm.py)
+runs/
+
+# Caché de pytest
+.pytest_cache/
+
 
 *.txt
+
+
+*por_hacer.md
+
+*MTH_PKM.pdf

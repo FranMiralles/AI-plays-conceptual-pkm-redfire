@@ -1,453 +1,93 @@
-from decimal import Decimal, ROUND_DOWN
-from entry_data import *
-from genetic_operators import *
-import numpy as np
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing
-import os
+"""Command line runner for the genetic algorithm.
 
-def generate_population(quantity, inteligent_generation=False):
-    population = []
-    for i in range(0, quantity):
-        population.append({
-            "gene": generate_individual(inteligent_generation=inteligent_generation),
-            "fitness": None  # Inicialmente sin calcular
-        })
-    return population
+Examples:
+    python genetic_algorithm.py --preset memoria --generations 300 --seed 1
+    python genetic_algorithm.py --preset mejorado --population 1000 --workers 4
+    python genetic_algorithm.py --preset mejorado --scenarios 100   (combates aleatorios)
+    python genetic_algorithm.py --resume runs/20261114-231500_mejorado --generations 500
 
-def eval_individual(individual, dataset):
-    """Evalúa un individuo (versión para threading)"""
-    # Si ya tiene fitness calculado, devolver directamente
-    if individual.get("fitness") is not None:
-        return individual
-    
-    # Calcular fitness si no está calculado
-    (_, fitness_value, _) = calculate_fitness(individual["gene"], dataset, verbose=False)
-    individual["fitness"] = fitness_value
-    return individual
+Each run is saved in runs/<fecha>_<preset>/ (config, history, hall of fame,
+best individual and checkpoint) and can be opened from the interface (python app.py).
+"""
+import argparse
+import sys
 
-def eval_population_parallel(population, dataset, max_workers=None):
-    """Evalúa la población en paralelo usando threads"""
-    if max_workers is None:
-        max_workers = min(multiprocessing.cpu_count(), 4)  # Limitar para Windows
-    
-    # Filtrar individuos que necesitan evaluación
-    individuals_to_evaluate = []
-    indices_to_evaluate = []
-    
-    for i, ind in enumerate(population):
-        if ind.get("fitness") is None:
-            individuals_to_evaluate.append(ind)
-            indices_to_evaluate.append(i)
-    
-    print(f"  Evaluando {len(individuals_to_evaluate)}/{len(population)} individuos...")
-    
-    # Si todos ya tienen fitness, devolver directamente
-    if not individuals_to_evaluate:
-        return population
-    
-    # Evaluar solo los que necesitan usando ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Crear tareas
-        futures = []
-        for ind in individuals_to_evaluate:
-            future = executor.submit(eval_individual, ind, dataset)
-            futures.append(future)
-        
-        # Recoger resultados
-        evaluated_individuals = []
-        for future in futures:
-            try:
-                result = future.result(timeout=300)  # Timeout de 5 minutos
-                evaluated_individuals.append(result)
-            except Exception as e:
-                print(f"Error evaluando individuo: {e}")
-                # En caso de error, asignar un fitness alto
-                ind_copy = ind.copy()
-                ind_copy["fitness"] = 1000.0
-                evaluated_individuals.append(ind_copy)
-    
-    # Actualizar la población original
-    for idx, evaluated_ind in zip(indices_to_evaluate, evaluated_individuals):
-        population[idx] = evaluated_ind
-    
-    return population
+from ga.config import PRESETS, preset
+from ga.engine import GeneticAlgorithm
 
-def eval_population_sequential(population, dataset):
-    """Evalúa población de forma secuencial, solo los que no tienen fitness"""
-    for individual in population:
-        if individual.get("fitness") is None:
-            try:
-                (_, fitness_value, _) = calculate_fitness(individual["gene"], dataset, verbose=False)
-                individual["fitness"] = fitness_value
-            except Exception as e:
-                print(f"Error evaluando individuo: {e}")
-                individual["fitness"] = 1000.0  # Fitness muy malo en caso de error
-    
-    return population
 
-def prob_population(population):
-    # Filtrar solo individuos con fitness calculado
-    evaluated_population = [ind for ind in population if ind.get("fitness") is not None]
-    
-    if not evaluated_population:
-        # Si ningún individuo tiene fitness, asignar probabilidades uniformes
-        for ind in population:
-            ind["prob"] = 1.0 / len(population)
-        return population
-    
-    # Convertir a float para evitar problemas de precisión
-    fitness_values = [float(ind["fitness"]) for ind in evaluated_population]
-    sum_all_fitness = sum(fitness_values)
-    
-    if sum_all_fitness == 0:
-        # Si todos los fitness son 0, usar probabilidades uniformes
-        prob_value = 1.0 / len(evaluated_population)
-        for ind in evaluated_population:
-            ind["prob"] = prob_value
+def _fmt(value, width=8):
+    return f"{value:>{width}.0f}" if isinstance(value, (int, float)) else f"{'-':>{width}}"
+
+
+def print_generation(stats: dict, _engine=None) -> None:
+    mark = " *" if stats["improved"] and stats["gen"] > 0 else ""
+    mode = f" | modo {stats['mode']}" if stats.get("mode") else ""
+    hit = f"{stats['battle_hit_rate']:.0%}" if stats.get("battle_hit_rate") is not None else "-"
+    switches = f" | cambios {stats['best_switches']}" if stats.get("best_switches") else ""
+    p_ok = f" | P(completar) {stats['best_p_complete']:.1%}" if stats.get("best_p_complete") is not None else ""
+    print(f"Gen {stats['gen']:4d}/{stats['generations']} | mejor {_fmt(stats['best'])} | mediana {_fmt(stats['median'])}"
+          f" | victorias {stats['best_wins']:2d}/21{p_ok}{switches} | únicos {stats['unique_ratio']:.0%} | div {stats['diversity']:.2f}"
+          f" | {stats['evals_per_s'] or 0:6.0f} eval/s | caché {hit}{mode}{mark}", flush=True)
+
+
+def main(argv=None):
+    sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--preset", choices=sorted(PRESETS), default="memoria")
+    parser.add_argument("--population", type=int)
+    parser.add_argument("--generations", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--workers", type=int, help="procesos para evaluar en paralelo")
+    parser.add_argument("--adaptive-modes", action="store_true", help="cambio exploración/explotación")
+    switching = parser.add_mutually_exclusive_group()
+    switching.add_argument("--switching", dest="switching", action="store_true", default=None,
+                           help="los individuos llevan un plan de cambios de Pokémon por combate")
+    switching.add_argument("--no-switching", dest="switching", action="store_false",
+                           help="sin cambios de Pokémon (como en la memoria)")
+    parser.add_argument("--scenarios", type=int, help="combates aleatorios: escenarios por combate (0 = determinista)")
+    parser.add_argument("--scenario-seed", type=int, help="semilla de los escenarios aleatorios")
+    parser.add_argument("--graded-penalty", action="store_true", help="derrota = 10000 + HP rival restante")
+    parser.add_argument("--run-dir", help="carpeta donde guardar la ejecución (por defecto runs/<fecha>_<preset>)")
+    parser.add_argument("--no-save", action="store_true", help="no guardar la ejecución en disco")
+    parser.add_argument("--resume", metavar="RUN_DIR", help="reanudar una ejecución guardada")
+    args = parser.parse_args(argv)
+
+    if args.resume:
+        ga = GeneticAlgorithm.resume(args.resume, generations=args.generations, on_generation=print_generation)
     else:
-        # Calcular probabilidades normalizadas
-        probs = [1 - (fitness / sum_all_fitness) for fitness in fitness_values]
-        
-        # Normalizar para que sumen exactamente 1
-        total_prob = sum(probs)
-        normalized_probs = [p / total_prob for p in probs]
-        
-        # Asignar probabilidades solo a los evaluados
-        for i, ind in enumerate(evaluated_population):
-            ind["prob"] = normalized_probs[i]
-        
-        # Los no evaluados tienen probabilidad 0
-        for ind in population:
-            if ind.get("fitness") is None:
-                ind["prob"] = 0.0
-    
-    return population
+        cfg = preset(args.preset).with_overrides(population=args.population, generations=args.generations,
+                                                 seed=args.seed, workers=args.workers)
+        if args.adaptive_modes:
+            cfg.adaptive_modes = True
+        if args.switching is not None:
+            cfg.switching = args.switching
+        if args.scenarios is not None:
+            cfg.scenarios = args.scenarios
+        if args.scenario_seed is not None:
+            cfg.scenario_seed = args.scenario_seed
+        if args.graded_penalty:
+            cfg.graded_loss_penalty = True
+        if args.population:  # keep the survivors share of the preset
+            base = PRESETS[args.preset]
+            cfg.survivors = max(1, round(base.survivors * args.population / base.population))
+        run_dir = None if args.no_save else (args.run_dir or GeneticAlgorithm.new_run_dir(cfg))
+        ga = GeneticAlgorithm(cfg, run_dir=run_dir, on_generation=print_generation)
+    print(f"Semilla: {ga.cfg.seed} | Carpeta: {ga.run_dir or '(sin guardar)'}")
+    try:
+        result = ga.run()
+    except KeyboardInterrupt:
+        ga.stopped = True
+        result = {"best": None, "stopped": True}
+    best = result.get("best")
+    if best:
+        print("-" * 60)
+        print(f"Mejor fitness: {best['fitness']} (gen {best['gen_found']}, {best['wins']}/21 victorias, "
+              f"{best['hp_lost']} % HP perdido)")
+        print(f"Genotipo: {best['genome']}")
+    if result.get("run_dir"):
+        print(f"Ejecución guardada en {result['run_dir']}")
 
-def select_from_population(population, percentage):
-    # Filtrar solo individuos con probabilidad > 0
-    eligible_population = [ind for ind in population if ind.get("prob", 0) > 0]
-    
-    if not eligible_population:
-        return [], population.copy()
-    
-    k = int(len(eligible_population) * percentage)
-    
-    if k == 0:
-        return [], population.copy()
-    
-    # Extraer probabilidades
-    probabilities = [ind["prob"] for ind in eligible_population]
-    
-    # Normalizar por si hay errores de redondeo
-    total_prob = sum(probabilities)
-    if total_prob > 0:
-        probabilities = [p / total_prob for p in probabilities]
-    else:
-        probabilities = [1/len(eligible_population)] * len(eligible_population)
 
-    selected_idx = np.random.choice(
-        len(eligible_population),
-        size=k,
-        replace=False,
-        p=probabilities
-    )
-
-    selected = [eligible_population[i] for i in selected_idx]
-    non_selected = [ind for ind in population if ind not in selected]
-    
-    return selected, non_selected
-
-def pair_individuals_for_crossover(selected_individuals):
-    import random
-    
-    individuals = selected_individuals.copy()
-    
-    if len(individuals) % 2 != 0:
-        individuals.pop(random.randint(0, len(individuals) - 1))
-    
-    random.shuffle(individuals)
-    
-    pairs = []
-    for i in range(0, len(individuals), 2):
-        pairs.append((individuals[i], individuals[i + 1]))
-    
-    return pairs
-
-def crossover_population(pairs):
-    """Crea nuevos hijos sin fitness calculado"""
-    children = []
-    
-    for parent1, parent2 in pairs:
-        gene1 = parent1["gene"]
-        gene2 = parent2["gene"]
-        
-        child_gene = crossover_individuals(gene1, gene2)
-        children.append({
-            "gene": child_gene,
-            "fitness": None  # Nuevo individuo, sin fitness calculado
-        })
-    
-    return children
-
-def mute_selected(selected_to_mute):
-    """Crea individuos mutados sin fitness calculado"""
-    muted = []
-    for selected in selected_to_mute:
-        muted_gene = mutate_individual_hard_feasibility(selected["gene"], PROB_MUTATE_CATCHES, PROB_MUTATE_TEAM)
-        muted.append({
-            "gene": muted_gene,
-            "fitness": None  # Nuevo individuo, sin fitness calculado
-        })
-    
-    return muted
-
-def get_best_individuals(population, x):
-    """Devuelve los mejores individuos completos (con gene y fitness)"""
-    # Filtrar individuos que tienen fitness calculado
-    evaluated_population = [ind for ind in population if ind.get("fitness") is not None]
-    
-    if not evaluated_population:
-        return []
-    
-    if len(evaluated_population) < x:
-        print(f"  Advertencia: Solo {len(evaluated_population)} individuos evaluados de {x} solicitados")
-        x = len(evaluated_population)
-    
-    sorted_population = sorted(evaluated_population, key=lambda ind: ind["fitness"])
-    return sorted_population[:x]
-
-def select_mode(generation, best_fitness_history, mode_history, patience=20, long_patience=50):
-    """
-    Decide si el algoritmo debe estar en modo 'exploration' o 'exploitation'.
-
-    Parámetros:
-    - generation: número de generación actual
-    - best_fitness_history: lista con los mejores fitness hasta ahora
-    - mode_history: lista con los modos elegidos hasta ahora
-    - patience: nº de generaciones sin mejora para pasar a exploración
-    - long_patience: nº de generaciones sin cambio de modo ni mejora para forzar cambio
-    """
-    if generation < 5:
-        return "exploration"
-
-    if len(best_fitness_history) < patience:
-        return "exploitation"
-
-    recent = best_fitness_history[-patience:]
-    delta = 0.005 * min(best_fitness_history)
-    if min(recent) >= min(best_fitness_history) - delta:
-        mode = "exploration"  # estancamiento → explorar
-    else:
-        mode = "exploitation"
-
-    if len(best_fitness_history) >= long_patience:
-        recent_modes = mode_history[-long_patience:]
-        recent_fitness = best_fitness_history[-long_patience:]
-
-        # comprobar si el modo ha sido el mismo todo este tiempo
-        no_mode_change = len(set(recent_modes)) == 1
-        no_improvement = min(recent_fitness) >= min(best_fitness_history) - delta
-
-        if no_mode_change and no_improvement:
-            # forzar cambio de modo (invertir)
-            mode = "exploration" if recent_modes[-1] == "exploitation" else "exploitation"
-
-    return mode
-
-# ALGORITMO GENÉTICO OPTIMIZADO
 if __name__ == "__main__":
-    best_fitness_history = []
-    generation_fitness_history = []
-    avg_fitness_history = []
-    mode_history = []
-    population = generate_population(POPULATION_NUMBER, inteligent_generation=False)
-    mode = "exploracion"
-    
-    for generation in range(0, 210):
-        print("GENERATION: ", generation)
-        
-        # DECIDIR MODO (exploración/explotación)
-        #mode = select_mode(generation, best_fitness_history, mode_history)
-        #print(f"  MODO: {mode.upper()}")
-
-        # Ajustar parámetros según modo
-        '''
-        if mode == "exploration":
-            CROSS_PERCENTAGE = CROSS_PERCENTAGE_EXPLORATION
-            PROB_MUTATE_CATCHES = PROB_MUTATE_CATCHES_EXPLORATION
-            PROB_MUTATE_TEAM = PROB_MUTATE_TEAM_EXPLORATION
-            SELECTED_PERCENTAGE = SELECTED_PERCENTAGE_EXPLORATION
-            GENERATION_NUMBER = GENERATION_NUMBER_EXPLORATION
-        else:  # explotación
-            CROSS_PERCENTAGE = CROSS_PERCENTAGE_EXPLOITATION
-            PROB_MUTATE_CATCHES = PROB_MUTATE_CATCHES_EXPLOITATION
-            PROB_MUTATE_TEAM = PROB_MUTATE_TEAM_EXPLOITATION
-            SELECTED_PERCENTAGE = SELECTED_PERCENTAGE_EXPLOITATION
-            GENERATION_NUMBER = GENERATION_NUMBER_EXPLOITATION
-        '''
-        # 1. EVALUAR POBLACIÓN ACTUAL
-        population = eval_population_sequential(population, dataset)
-        
-        # 2. CALCULAR PROBABILIDADES
-        population_with_prob = prob_population(population)
-        
-        # 3. SELECCIÓN
-        selected_to_cross_mute, non_selected = select_from_population(population_with_prob, SELECTED_PERCENTAGE)
-        
-        # Verificar que tenemos individuos para continuar
-        if len(selected_to_cross_mute) < 2:
-            print("  No hay suficientes individuos seleccionados, generando nueva población...")
-            population = generate_population(POPULATION_NUMBER)
-            continue
-            
-        selected_to_cross, selected_to_mute = select_from_population(selected_to_cross_mute, CROSS_PERCENTAGE)
-        
-        # 4. OPERADORES GENÉTICOS
-        children = []
-        if len(selected_to_cross) >= 2:
-            pairs_to_cross = pair_individuals_for_crossover(selected_to_cross)
-            children = crossover_population(pairs_to_cross)
-        
-        muted = []
-        if selected_to_mute:
-            muted = mute_selected(selected_to_mute)
-        
-        # 5. EVALUAR NUEVOS INDIVIDUOS
-        new_individuals = children + muted
-        if new_individuals:
-            new_individuals_evaluated = eval_population_sequential(new_individuals, dataset)
-        else:
-            new_individuals_evaluated = []
-        
-        # 6. COMBINAR Y SELECCIONAR MEJORES
-        all_individuals = population + new_individuals_evaluated
-        
-        # Asegurar que tenemos suficientes individuos evaluados
-        evaluated_count = len([ind for ind in all_individuals if ind.get("fitness") is not None])
-        if evaluated_count < GENERATION_NUMBER:
-            missing = GENERATION_NUMBER - evaluated_count
-            additional = generate_population(missing)
-            additional_evaluated = eval_population_sequential(additional, dataset)
-            all_individuals.extend(additional_evaluated)
-        
-        best_individuals = get_best_individuals(all_individuals, GENERATION_NUMBER)
-        
-        # 7. COMPLETAR POBLACIÓN
-        new_random = generate_population(POPULATION_NUMBER - GENERATION_NUMBER, inteligent_generation=True)
-        
-        # 8. NUEVA POBLACIÓN
-        population = best_individuals + new_random
-        
-        #9 EVALUAR
-        evaluated_population = [ind for ind in population if ind.get("fitness") is not None]
-
-        # MOSTRAR PROGRESO
-        evaluated_population = [ind for ind in population if ind.get("fitness") is not None]
-        if evaluated_population:
-            current_fitness = [ind["fitness"] for ind in evaluated_population]
-            current_best_fitness = min(current_fitness)
-            
-            if not hasattr(mode_history, '__len__'):
-                mode_history = []
-            
-            # Al empezar, 5 generaciones en exploración
-            if len(generation_fitness_history) < 5:
-                mode = "exploracion"
-                # Aplicar parámetros de exploración
-                SELECTED_PERCENTAGE = SELECTED_PERCENTAGE_EXPLORATION
-                CROSS_PERCENTAGE = CROSS_PERCENTAGE_EXPLORATION
-                PROB_MUTATE_CATCHES = PROB_MUTATE_CATCHES_EXPLORATION
-                PROB_MUTATE_TEAM = PROB_MUTATE_TEAM_EXPLORATION
-                GENERATION_NUMBER = GENERATION_NUMBER_EXPLORATION
-            
-            else:
-                # Extraer los mejores fitness de las últimas 5 generaciones
-                last_five_best_fitness = [min(gen_fitness) for gen_fitness in generation_fitness_history[-5:]]
-                
-                # Verificar si estamos en periodo mínimo de explotación (últimas 5 generaciones)
-                last_five_modes = mode_history[-5:] if len(mode_history) >= 5 else mode_history
-                in_min_exploitation_period = len(last_five_modes) > 0 and all(m == "explotacion" for m in last_five_modes)
-                
-                # Si actualmente estamos en explotación y no hemos cumplido las 5 generaciones, mantener explotación
-                if len(mode_history) > 0 and mode_history[-1] == "explotacion" and not in_min_exploitation_period:
-                    # Mantener explotación hasta cumplir 5 generaciones
-                    print("MANTENIENDO EXPLOTACIÓN - Periodo mínimo")
-                    SELECTED_PERCENTAGE = SELECTED_PERCENTAGE_EXPLOITATION
-                    CROSS_PERCENTAGE = CROSS_PERCENTAGE_EXPLOITATION
-                    PROB_MUTATE_CATCHES = PROB_MUTATE_CATCHES_EXPLOITATION
-                    PROB_MUTATE_TEAM = PROB_MUTATE_TEAM_EXPLOITATION
-                    GENERATION_NUMBER = GENERATION_NUMBER_EXPLOITATION
-                    mode = "explotacion"
-                
-                # Si hay mejora y no estamos forzados a mantener exploración, ir a explotación
-                elif current_best_fitness < min(last_five_best_fitness):
-                    print("MODO EXPLOTACIÓN - Mejora detectada")
-                    SELECTED_PERCENTAGE = SELECTED_PERCENTAGE_EXPLOITATION
-                    CROSS_PERCENTAGE = CROSS_PERCENTAGE_EXPLOITATION
-                    PROB_MUTATE_CATCHES = PROB_MUTATE_CATCHES_EXPLOITATION
-                    PROB_MUTATE_TEAM = PROB_MUTATE_TEAM_EXPLOITATION
-                    GENERATION_NUMBER = GENERATION_NUMBER_EXPLOITATION
-                    mode = "explotacion"
-                
-                else:
-                    # No hay mejora
-                    print("MODO EXPLORACIÓN")
-                    print(f"Current best: {current_best_fitness}")
-                    print(f"Last five bests: {last_five_best_fitness}")
-                    print(f"Min of last five: {min(last_five_best_fitness)}")
-                    
-                    SELECTED_PERCENTAGE = SELECTED_PERCENTAGE_EXPLORATION
-                    CROSS_PERCENTAGE = CROSS_PERCENTAGE_EXPLORATION
-                    PROB_MUTATE_CATCHES = PROB_MUTATE_CATCHES_EXPLORATION
-                    PROB_MUTATE_TEAM = PROB_MUTATE_TEAM_EXPLORATION
-                    GENERATION_NUMBER = GENERATION_NUMBER_EXPLORATION
-                    mode = "exploracion"
-            
-            # Guardar historial
-            generation_fitness_history.append(current_fitness)
-            mode_history.append(mode)
-            best_fitness = current_best_fitness
-            avg_fitness = sum(current_fitness) / len(current_fitness)
-            best_fitness_history.append(best_fitness)
-            avg_fitness_history.append(avg_fitness)
-            
-            print(f"  Mejor fitness: {best_fitness:.4f}, Promedio: {avg_fitness:.4f}, Mode: {mode}")
-            print("-" * 50)
-    print("POPULATION:")
-    print(population)
-
-    # Mostrar gráficos de evolución
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    generations = np.arange(1, len(best_fitness_history)+1)
-
-    # 1. Gráfico de fitness
-    plt.figure(figsize=(10,5))
-    plt.plot(generations, best_fitness_history, 'b-', marker='o', label="Mejor Fitness")
-    plt.plot(generations, avg_fitness_history, 'r--', marker='x', label="Fitness Promedio")
-    plt.xlabel("Generación")
-    plt.ylabel("Fitness")
-    plt.title("Evolución del Fitness")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("fitness_evolution_5000_2.png")
-    plt.show()
-
-    '''
-    # 2. Gráfico de modos (exploración/explotación)
-    mode_numeric = [1 if m=="exploration" else 0 for m in mode_history]  # 1 = exploración, 0 = explotación
-
-    plt.figure(figsize=(10,2))
-    plt.scatter(generations, mode_numeric, c=mode_numeric, cmap="coolwarm", marker='s', s=50)
-    plt.yticks([0,1], ["Explotación", "Exploración"])
-    plt.xlabel("Generación")
-    plt.title("Modo por Generación")
-    plt.grid(True, axis='x')
-    plt.tight_layout()
-    plt.savefig("mode_evolution_4.png")
-    plt.show()
-    print("Ejecución completada")
-    '''
+    main()
